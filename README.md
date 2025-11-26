@@ -256,6 +256,3 @@ This formula accounts for both volume and complexity of changes.
 - `process_devex_metrics.py` - Processes raw GitLab data into normalized CSVs
 - `apply_normalization.py` - Normalizes and anonymizes contributor data
 
-## Citation
-
-If you use this script in your research, please cite your paper (to be added after publication).
