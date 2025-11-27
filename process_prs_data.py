@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 import numpy as np
+import argparse
 
 def parse_date(date_str):
     """Parse date string to datetime object"""
@@ -46,7 +47,77 @@ def get_month_year(date_obj):
         date_obj = date_obj.replace(tzinfo=None)
     return date_obj.strftime('%m-%Y')
 
-def process_gitlab_data(csv_path):
+def get_period(date_obj):
+    """Get period identifier (2024 or 2025)"""
+    if date_obj is None:
+        return None
+    if date_obj.tzinfo is not None:
+        date_obj = date_obj.replace(tzinfo=None)
+    return date_obj.year
+
+def get_common_participants(df, author_col, reviewer_col):
+    """
+    Get common participants (authors and reviewers) between 2024 and 2025 periods
+    Returns a set of common participant names
+    """
+    df['period'] = df['created_date'].apply(get_period)
+    
+    # Get all participants per period
+    participants_2024 = set()
+    participants_2025 = set()
+    
+    for _, row in df.iterrows():
+        period = row['period']
+        if period is None:
+            continue
+        
+        # Add author
+        if pd.notna(row[author_col]):
+            author = str(row[author_col]).strip()
+            if author:
+                if period == 2024:
+                    participants_2024.add(author)
+                elif period == 2025:
+                    participants_2025.add(author)
+        
+        # Add reviewers
+        if pd.notna(row[reviewer_col]):
+            reviewers_str = str(row[reviewer_col])
+            reviewers = [r.strip() for r in reviewers_str.split(',') if r.strip()]
+            for reviewer in reviewers:
+                if period == 2024:
+                    participants_2024.add(reviewer)
+                elif period == 2025:
+                    participants_2025.add(reviewer)
+    
+    common = participants_2024 & participants_2025
+    print(f"  Participants in 2024: {len(participants_2024)}")
+    print(f"  Participants in 2025: {len(participants_2025)}")
+    print(f"  Common participants: {len(common)}")
+    
+    return common
+
+def is_common_participant(row, common_participants, author_col, reviewer_col):
+    """Check if PR involves at least one common participant (as author or reviewer)"""
+    if not common_participants:
+        return True  # If no filtering, include all
+    
+    # Check author
+    if pd.notna(row[author_col]):
+        author = str(row[author_col]).strip()
+        if author in common_participants:
+            return True
+    
+    # Check reviewers
+    if pd.notna(row[reviewer_col]):
+        reviewers_str = str(row[reviewer_col])
+        reviewers = [r.strip() for r in reviewers_str.split(',') if r.strip()]
+        if any(r in common_participants for r in reviewers):
+            return True
+    
+    return False
+
+def process_gitlab_data(csv_path, common_only=False):
     """Process GitLab MRs data"""
     print(f"Processing GitLab data from: {csv_path}")
     
@@ -61,6 +132,16 @@ def process_gitlab_data(csv_path):
     df = df[df['created_date'].apply(is_in_date_range)].copy()
     
     print(f"GitLab: {len(df)} MRs in date range")
+    
+    # Get common participants if needed
+    common_participants = set()
+    if common_only:
+        print("GitLab: Filtering for common participants only")
+        common_participants = get_common_participants(df, 'anonymized_name', 'anonymized_reviewers')
+        # Filter dataframe
+        df = df[df.apply(lambda row: is_common_participant(row, common_participants, 
+                                                           'anonymized_name', 'anonymized_reviewers'), axis=1)].copy()
+        print(f"GitLab: {len(df)} MRs after common participants filter")
     
     # Convert duration_hours to numeric
     df['duration_hours'] = pd.to_numeric(df['duration_hours'], errors='coerce')
@@ -141,7 +222,7 @@ def process_gitlab_data(csv_path):
         }
     }
 
-def process_bitbucket_data(csv_path):
+def process_bitbucket_data(csv_path, common_only=False):
     """Process Bitbucket PRs data"""
     print(f"Processing Bitbucket data from: {csv_path}")
     
@@ -155,6 +236,16 @@ def process_bitbucket_data(csv_path):
     df = df[df['created_date'].apply(is_in_date_range)].copy()
     
     print(f"Bitbucket: {len(df)} PRs in date range")
+    
+    # Get common participants if needed
+    common_participants = set()
+    if common_only:
+        print("Bitbucket: Filtering for common participants only")
+        common_participants = get_common_participants(df, 'anonymized_author', 'anonymized_reviewers')
+        # Filter dataframe
+        df = df[df.apply(lambda row: is_common_participant(row, common_participants, 
+                                                           'anonymized_author', 'anonymized_reviewers'), axis=1)].copy()
+        print(f"Bitbucket: {len(df)} PRs after common participants filter")
     
     # Convert cycle_time_hours to numeric
     df['cycle_time_hours'] = pd.to_numeric(df['cycle_time_hours'], errors='coerce')
@@ -240,23 +331,36 @@ def process_bitbucket_data(csv_path):
 def main():
     """Main function to process both CSVs and generate JSON"""
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Process PRs data from GitLab and Bitbucket')
+    parser.add_argument('--common-only', action='store_true', 
+                       help='Filter metrics to include only common participants between 2024 and 2025 periods')
+    args = parser.parse_args()
+    
     # Define paths
     base_dir = Path('/home/osw100337/Documents/DevEx')
     gitlab_csv = base_dir / 'consolidated' / 'gitlab_mrs_merged_20251024_114758.csv'
     bitbucket_csv = base_dir / 'consolidated' / 'bitbucket_prs_merged_20251024_114911.csv'
-    output_json = base_dir / 'prs_metrics_output.json'
+    
+    # Adjust output filename based on filter
+    if args.common_only:
+        output_json = base_dir / 'prs_metrics_output_common_only.json'
+        print("\n=== Processing with COMMON PARTICIPANTS ONLY filter ===\n")
+    else:
+        output_json = base_dir / 'prs_metrics_output.json'
+        print("\n=== Processing ALL participants ===\n")
     
     # Process data
     result = {}
     
     if gitlab_csv.exists():
-        result['gitlab'] = process_gitlab_data(gitlab_csv)
+        result['gitlab'] = process_gitlab_data(gitlab_csv, common_only=args.common_only)
     else:
         print(f"Warning: GitLab CSV not found at {gitlab_csv}")
         result['gitlab'] = {"prData": {"summaryByMonth": {}, "list": []}}
     
     if bitbucket_csv.exists():
-        result['bitbucket'] = process_bitbucket_data(bitbucket_csv)
+        result['bitbucket'] = process_bitbucket_data(bitbucket_csv, common_only=args.common_only)
     else:
         print(f"Warning: Bitbucket CSV not found at {bitbucket_csv}")
         result['bitbucket'] = {"prData": {"summaryByMonth": {}, "list": []}}
